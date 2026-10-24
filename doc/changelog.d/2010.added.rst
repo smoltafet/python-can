@@ -1,0 +1,1 @@
+Added an optional ``tz`` argument to :class:`can.BLFReader` and :class:`can.BLFWriter` to interpret the timezone-less start/stop timestamps in the file header in a given timezone (e.g. the local timezone of the computer that recorded the file with a Vector tool) instead of always assuming UTC.

@@ -959,6 +959,95 @@ class TestBlfFileFormat(ReaderWriterTest):
         self.assertMessageEqual(expected, msgs[0])
 
 
+class TestBlfTimezone(unittest.TestCase):
+    """Tests the ``tz`` argument of BLFReader and BLFWriter.
+
+    The BLF header stores the start/stop timestamps as a broken-down
+    SYSTEMTIME without any timezone information. Vector tools write it in
+    the local timezone of the recording computer, so interpreting it in
+    another timezone shifts all message timestamps.
+    """
+
+    def test_systemtime_conversion_with_timezone(self):
+        tz = timezone(timedelta(hours=2))
+        # 2024-01-15 was a Monday (weekday 1 in SYSTEMTIME, Sunday is 0)
+        systemtime = (2024, 1, 1, 15, 12, 30, 15, 123)
+        as_utc = blf.systemtime_to_timestamp(systemtime)
+        as_plus2 = blf.systemtime_to_timestamp(systemtime, tz)
+        # the same wall-clock time at UTC+2 is two hours earlier in UTC
+        self.assertEqual(as_utc - as_plus2, 2 * 3600)
+        # and converting back with the same timezone is lossless
+        self.assertEqual(blf.timestamp_to_systemtime(as_plus2, tz), systemtime)
+        self.assertEqual(blf.timestamp_to_systemtime(as_utc), systemtime)
+
+    def test_writer_reader_roundtrip_with_timezone(self):
+        tz = timezone(timedelta(hours=-5))
+        messages = [
+            can.Message(
+                timestamp=1700000000.123,
+                arbitration_id=0x123,
+                data=[1, 2, 3],
+                is_extended_id=False,
+            ),
+            can.Message(
+                timestamp=1700000000.623,
+                arbitration_id=0x124,
+                data=[4, 5],
+                is_extended_id=False,
+            ),
+        ]
+        with tempfile.NamedTemporaryFile(suffix=".blf", delete=False) as tmp:
+            filename = tmp.name
+        try:
+            with can.BLFWriter(filename, tz=tz) as writer:
+                for message in messages:
+                    writer.on_message_received(message)
+
+            # reading with the same timezone reproduces the timestamps
+            with can.BLFReader(filename, tz=tz) as reader:
+                self.assertAlmostEqual(
+                    reader.start_timestamp, messages[0].timestamp, delta=0.002
+                )
+                read_messages = list(reader)
+            self.assertEqual(len(read_messages), len(messages))
+            for index, expected in enumerate(messages):
+                self.assertAlmostEqual(
+                    read_messages[index].timestamp, expected.timestamp, delta=0.002
+                )
+
+            # reading without a timezone (UTC) shifts them by the offset
+            with can.BLFReader(filename) as reader:
+                shifted = list(reader)
+            for index, expected in enumerate(read_messages):
+                self.assertAlmostEqual(
+                    shifted[index].timestamp - expected.timestamp,
+                    -5 * 3600,
+                    delta=0.002,
+                )
+        finally:
+            os.unlink(filename)
+
+    def test_append_with_timezone_keeps_start_timestamp(self):
+        tz = timezone(timedelta(hours=3))
+        message = can.Message(
+            timestamp=1700000000.0,
+            arbitration_id=0x123,
+            data=[1],
+            is_extended_id=False,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".blf", delete=False) as tmp:
+            filename = tmp.name
+        try:
+            with can.BLFWriter(filename, tz=tz) as writer:
+                writer.on_message_received(message)
+            with can.BLFWriter(filename, append=True, tz=tz) as writer:
+                self.assertAlmostEqual(
+                    writer.start_timestamp, message.timestamp, delta=0.002
+                )
+        finally:
+            os.unlink(filename)
+
+
 class TestCanutilsFileFormat(ReaderWriterTest):
     """Tests can.CanutilsLogWriter and can.CanutilsLogReader"""
 

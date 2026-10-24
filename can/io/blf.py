@@ -104,11 +104,15 @@ TIME_TEN_MICS_FACTOR = Decimal("1e-5")
 TIME_ONE_NANS_FACTOR = Decimal("1e-9")
 
 
-def timestamp_to_systemtime(timestamp: float | None) -> TSystemTime:
+def timestamp_to_systemtime(
+    timestamp: float | None, tz: datetime.tzinfo | None = None
+) -> TSystemTime:
     if timestamp is None or timestamp < 631152000:
         # Probably not a Unix timestamp
         return 0, 0, 0, 0, 0, 0, 0, 0
-    t = datetime.datetime.fromtimestamp(round(timestamp, 3), tz=datetime.timezone.utc)
+    t = datetime.datetime.fromtimestamp(
+        round(timestamp, 3), tz=tz or datetime.timezone.utc
+    )
     return (
         t.year,
         t.month,
@@ -121,7 +125,9 @@ def timestamp_to_systemtime(timestamp: float | None) -> TSystemTime:
     )
 
 
-def systemtime_to_timestamp(systemtime: TSystemTime) -> float:
+def systemtime_to_timestamp(
+    systemtime: TSystemTime, tz: datetime.tzinfo | None = None
+) -> float:
     try:
         t = datetime.datetime(
             systemtime[0],
@@ -131,7 +137,7 @@ def systemtime_to_timestamp(systemtime: TSystemTime) -> float:
             systemtime[5],
             systemtime[6],
             systemtime[7] * 1000,
-            tzinfo=datetime.timezone.utc,
+            tzinfo=tz or datetime.timezone.utc,
         )
         return t.timestamp()
     except ValueError:
@@ -149,12 +155,19 @@ class BLFReader(BinaryIOMessageReader):
     def __init__(
         self,
         file: StringPathLike | BinaryIO,
+        tz: datetime.tzinfo | None = None,
         **kwargs: Any,
     ) -> None:
         """
         :param file: a path-like object or as file-like object to read from
                      If this is a file-like object, is has to opened in binary
                      read mode, not text read mode.
+        :param tz: the timezone the start and stop timestamps in the file
+                   header are interpreted in. Vector tools like CANoe write
+                   these in the local timezone of the recording computer, so
+                   pass the matching timezone to get correct (absolute)
+                   message timestamps for such files.
+                   Defaults to UTC if not given.
         """
         super().__init__(file, mode="rb")
         data = self.file.read(FILE_HEADER_STRUCT.size)
@@ -165,10 +178,10 @@ class BLFReader(BinaryIOMessageReader):
         self.uncompressed_size = header[11]
         self.object_count = header[12]
         self.start_timestamp = systemtime_to_timestamp(
-            cast("TSystemTime", header[14:22])
+            cast("TSystemTime", header[14:22]), tz
         )
         self.stop_timestamp = systemtime_to_timestamp(
-            cast("TSystemTime", header[22:30])
+            cast("TSystemTime", header[22:30]), tz
         )
         # Read rest of header
         self.file.read(header[1] - FILE_HEADER_STRUCT.size)
@@ -390,6 +403,7 @@ class BLFWriter(BinaryIOMessageWriter):
         append: bool = False,
         channel: int = 1,
         compression_level: int = -1,
+        tz: datetime.tzinfo | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -399,6 +413,12 @@ class BLFWriter(BinaryIOMessageWriter):
             Default channel to log as if not specified by the interface.
         :param append:
             Append messages to an existing log file.
+        :param tz:
+            The timezone the start and stop timestamps in the file header
+            are written in (and interpreted in when appending to an
+            existing file). Vector tools like CANoe expect these in the
+            local timezone of the recording computer.
+            Defaults to UTC if not given.
         :param compression_level:
             An integer from 0 to 9 or -1 controlling the level of compression.
             1 (Z_BEST_SPEED) is fastest and produces the least compression.
@@ -417,6 +437,7 @@ class BLFWriter(BinaryIOMessageWriter):
         assert self.file is not None
         self.channel = channel
         self.compression_level = compression_level
+        self.tz = tz
         self._buffer: list[bytes] = []
         self._buffer_size = 0
         # If max container size is located in kwargs, then update the instance
@@ -431,10 +452,10 @@ class BLFWriter(BinaryIOMessageWriter):
             self.uncompressed_size = header[11]
             self.object_count = header[12]
             self.start_timestamp: float | None = systemtime_to_timestamp(
-                cast("TSystemTime", header[14:22])
+                cast("TSystemTime", header[14:22]), self.tz
             )
             self.stop_timestamp: float | None = systemtime_to_timestamp(
-                cast("TSystemTime", header[22:30])
+                cast("TSystemTime", header[22:30]), self.tz
             )
             # Jump to the end of the file
             self.file.seek(0, 2)
@@ -450,8 +471,8 @@ class BLFWriter(BinaryIOMessageWriter):
         header = [b"LOGG", FILE_HEADER_SIZE, self.application_id, 0, 0, 0, 2, 6, 8, 1]
         # The meaning of "count of objects read" is unknown
         header.extend([filesize, self.uncompressed_size, self.object_count, 0])
-        header.extend(timestamp_to_systemtime(self.start_timestamp))
-        header.extend(timestamp_to_systemtime(self.stop_timestamp))
+        header.extend(timestamp_to_systemtime(self.start_timestamp, self.tz))
+        header.extend(timestamp_to_systemtime(self.stop_timestamp, self.tz))
         self.file.write(FILE_HEADER_STRUCT.pack(*header))
         # Pad to header size
         self.file.write(b"\x00" * (FILE_HEADER_SIZE - FILE_HEADER_STRUCT.size))
