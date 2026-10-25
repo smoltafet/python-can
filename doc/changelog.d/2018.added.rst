@@ -1,0 +1,1 @@
+The ``socketcand`` interface can now connect to a socketcand daemon through a Unix domain socket via the new ``unix_socket_path`` argument, as an alternative to a TCP host/port pair.

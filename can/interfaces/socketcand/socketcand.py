@@ -188,13 +188,19 @@ def convert_can_message_to_ascii_message(can_message: can.Message) -> str:
     return f"< send {can_id_string} {length:X} {bytes_string} >"
 
 
-def connect_to_server(s, host, port):
+def connect_to_server(s, address):
+    """Connect the socket *s* to a socketcand server, retrying for up to 10s.
+
+    :param address:
+        Either a ``(host, port)`` tuple for a TCP connection, or the path of
+        a Unix domain socket as a string.
+    """
     timeout_ms = 10000
     now = time.time() * 1000
     end_time = now + timeout_ms
     while now < end_time:
         try:
-            s.connect((host, port))
+            s.connect(address)
             return
         except Exception as e:
             log.warning(f"Failed to connect to server: {type(e)} Message: {e}")
@@ -205,7 +211,16 @@ def connect_to_server(s, host, port):
 
 
 class SocketCanDaemonBus(can.BusABC):
-    def __init__(self, channel, host, port, tcp_tune=False, can_filters=None, **kwargs):
+    def __init__(
+        self,
+        channel,
+        host=None,
+        port=None,
+        unix_socket_path=None,
+        tcp_tune=False,
+        can_filters=None,
+        **kwargs,
+    ):
         """Connects to a CAN bus served by socketcand.
 
         It implements :meth:`can.BusABC._detect_available_configs` to search for
@@ -221,21 +236,56 @@ class SocketCanDaemonBus(can.BusABC):
             The can interface name served by socketcand.
             An example channel would be 'vcan0' or 'can0'.
         :param host:
-            The host address of the socketcand server.
+            The host address of the socketcand server. Required together with
+            *port*, unless *unix_socket_path* is given.
         :param port:
-            The port of the socketcand server.
+            The port of the socketcand server. Required together with
+            *host*, unless *unix_socket_path* is given.
+        :param unix_socket_path:
+            The path of a Unix domain socket to connect to instead of using
+            TCP. socketcand can listen on such a socket, which is useful
+            when the daemon runs on the same machine, e.g. when its socket
+            is passed into a container. Mutually exclusive with *host* and
+            *port*.
         :param tcp_tune:
             This tunes the TCP socket for low latency (TCP_NODELAY, and
             TCP_QUICKACK).
-            This option is not available under windows.
+            This option is not available under windows, and has no effect
+            when connecting through a Unix domain socket.
         :param can_filters:
             See :meth:`can.BusABC.set_filters`.
         """
+        if unix_socket_path is not None:
+            if host is not None or port is not None:
+                raise can.CanInitializationError(
+                    "'host'/'port' and 'unix_socket_path' are mutually exclusive; "
+                    "pass either a TCP address or a Unix socket path, not both"
+                )
+            if not hasattr(socket, "AF_UNIX"):
+                raise can.CanInitializationError(
+                    "Unix domain sockets are not available on this platform"
+                )
+        elif host is None or port is None:
+            raise can.CanInitializationError(
+                "Either 'host' and 'port', or 'unix_socket_path' must be given "
+                "to connect to a socketcand server"
+            )
+
         self.__host = host
         self.__port = port
+        self.__unix_socket_path = unix_socket_path
 
         self.__tcp_tune = tcp_tune
-        self.__socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if unix_socket_path is not None:
+            self.__socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            if self.__tcp_tune:
+                self.__tcp_tune = False
+                log.warning(
+                    "'tcp_tune' does not apply to Unix domain sockets. "
+                    "Setting to False"
+                )
+        else:
+            self.__socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         if self.__tcp_tune:
             if os.name == "nt":
@@ -247,8 +297,12 @@ class SocketCanDaemonBus(can.BusABC):
         self.__message_buffer = deque()
         self.__receive_buffer = ""  # i know string is not the most efficient here
         self.channel = channel
-        self.channel_info = f"socketcand on {channel}@{host}:{port}"
-        connect_to_server(self.__socket, self.__host, self.__port)
+        if unix_socket_path is not None:
+            self.channel_info = f"socketcand on {channel}@{unix_socket_path}"
+            connect_to_server(self.__socket, self.__unix_socket_path)
+        else:
+            self.channel_info = f"socketcand on {channel}@{host}:{port}"
+            connect_to_server(self.__socket, (self.__host, self.__port))
         self._expect_msg("< hi >")
 
         log.info(
